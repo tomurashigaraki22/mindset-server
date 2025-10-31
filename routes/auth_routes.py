@@ -9,6 +9,48 @@ import os
 import google.generativeai as genai
 
 auth = Blueprint('auth', __name__)
+stripe.api_key = os.getenv('STRIPE_SECRET_KEY')
+
+@auth.route('/create-payment-intent-10', methods=['POST'])
+def create_payment_intent_10():
+    try:
+        # Create a PaymentIntent for $10 (1000 cents)
+        payment_intent = stripe.PaymentIntent.create(
+            amount=1000,  # Amount in cents ($10.00)
+            currency='usd'
+        )
+
+        # Return the client secret to the frontend
+        return jsonify({
+            'client_secret': payment_intent.client_secret
+        }), 200
+
+    except stripe.error.StripeError as e:
+        return jsonify({'error': str(e)}), 400
+
+@auth.route('/create-payment-intent-18', methods=['POST'])
+def create_payment_intent_18():
+    try:
+        payment_intent = stripe.PaymentIntent.create(
+            amount=1800,
+            currency='usd'
+        )
+
+        return jsonify({
+            'client_secret': payment_intent.client_secret
+        }), 200
+
+    except stripe.error.StripeError as e:
+        return jsonify({'error': str(e)}), 400
+
+@auth.route('/get-publishable-key', methods=['GET'])
+def get_publishable_key():
+    publishable_key = os.getenv('SANDBOX_PUBLISHABLE_KEY_STRIPE')
+
+    if not publishable_key:
+        return jsonify({'error': 'Publishable key not found'}), 404
+
+    return jsonify({'publishable_key': publishable_key}), 200
 
 @auth.route('/register', methods=['POST'])
 def register():
