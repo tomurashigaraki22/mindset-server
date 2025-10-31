@@ -3,6 +3,7 @@ from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identi
 from werkzeug.security import generate_password_hash, check_password_hash
 from utils.db_helper import get_db_connection
 import pymysql
+from datetime import timedelta
 
 import os
 import google.generativeai as genai
@@ -70,7 +71,7 @@ def login():
     if not user or not check_password_hash(user['password_hash'], password):
         return jsonify({'error': 'Invalid email or password'}), 401
 
-    token = create_access_token(identity=email)
+    token = create_access_token(identity=email, expires_delta=timedelta(days=7))
     return jsonify({
         'message': 'Login successful 🌱',
         'token': token,

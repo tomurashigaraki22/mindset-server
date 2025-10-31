@@ -73,7 +73,6 @@ def create_channel():
     finally:
         cursor.close()
         conn.close()
-
 @community.route('/channels/<int:channel_id>/posts', methods=['GET'])
 @jwt_required()
 def list_posts(channel_id):
@@ -85,9 +84,9 @@ def list_posts(channel_id):
     conn = get_db_connection()
     cursor = conn.cursor(pymysql.cursors.DictCursor)
     try:
-        # Fetch all posts for the specified channel
+        # Fetch all posts for the specified channel with likes and dislikes counts
         cursor.execute(
-            "SELECT id, title, body, user_id, created_at FROM posts "
+            "SELECT id, title, body, user_id, created_at, likes, dislikes FROM posts "
             "WHERE channel_id = %s AND is_deleted = 0 ORDER BY created_at DESC",
             (channel_id,)
         )
@@ -109,31 +108,17 @@ def list_posts(channel_id):
                     'email': row['email'],
                 }
 
-        # Build a reaction map for each post (like, dislike counts)
-        post_reactions = {}
-        post_ids = [p['id'] for p in posts]
-        if post_ids:
-            placeholders = ','.join(['%s'] * len(post_ids))
+        # Fetch the user's own reaction to each post (like, dislike, or none)
+        user_reactions = {}
+        post_ids = list({p['id'] for p in posts})
+        if post_ids:  # Ensure we have posts to check for the user's reactions
+            placeholders = ','.join(['%s'] * len(post_ids))  # Create placeholders for post_ids
             cursor.execute(
-                f"SELECT post_id, reaction, COUNT(*) AS count FROM likes WHERE post_id IN ({placeholders}) GROUP BY post_id, reaction",
-                tuple(post_ids)
+                f"SELECT post_id, reaction FROM likes WHERE user_id = %s AND post_id IN ({placeholders})",
+                [user_id] + post_ids  # Pass user_id first, then post_ids as separate parameters
             )
             for row in cursor.fetchall():
-                if row['post_id'] not in post_reactions:
-                    post_reactions[row['post_id']] = {'likes': 0, 'dislikes': 0}
-                if row['reaction'] == 1:
-                    post_reactions[row['post_id']]['likes'] = row['count']
-                elif row['reaction'] == -1:
-                    post_reactions[row['post_id']]['dislikes'] = row['count']
-
-        # Check the user's own reaction to each post
-        user_reactions = {}
-        cursor.execute(
-            "SELECT post_id, reaction FROM likes WHERE user_id = %s AND post_id IN (%s)",
-            (user_id, ','.join([str(post['id']) for post in posts]))
-        )
-        for row in cursor.fetchall():
-            user_reactions[row['post_id']] = row['reaction']
+                user_reactions[row['post_id']] = row['reaction']
 
         # Enrich the posts with author, reactions, and user's own reaction
         enriched_posts = []
@@ -141,8 +126,7 @@ def list_posts(channel_id):
             enriched_post = {
                 **post,
                 'author': authors.get(post['user_id'], None),
-                'reactions': post_reactions.get(post['id'], {'likes': 0, 'dislikes': 0}),
-                'user_reaction': user_reactions.get(post['id'], None)  # user's own reaction (like, dislike, or None)
+                'user_reaction': user_reactions.get(str(post['id']), None)  # user's own reaction (like, dislike, or None)
             }
             enriched_posts.append(enriched_post)
 
@@ -151,6 +135,8 @@ def list_posts(channel_id):
     finally:
         cursor.close()
         conn.close()
+
+
 
 @community.route('/channels/<int:channel_id>/posts', methods=['POST'])
 @jwt_required()
@@ -381,28 +367,54 @@ def react_to_post(post_id):
     try:
         # Check if the user has already reacted to the post
         cursor.execute(
-            "SELECT id FROM likes WHERE post_id = %s AND user_id = %s",
+            "SELECT id, reaction FROM likes WHERE post_id = %s AND user_id = %s",
             (post_id, user_id)
         )
         existing_reaction = cursor.fetchone()
 
         if existing_reaction:
             # If a reaction exists, update it
+            old_reaction = existing_reaction['reaction']
+            if old_reaction == 1 and reaction == -1:
+                # If the user was previously liking and now dislikes
+                cursor.execute(
+                    "UPDATE posts SET likes = likes - 1, dislikes = dislikes + 1 WHERE id = %s",
+                    (post_id,)
+                )
+            elif old_reaction == -1 and reaction == 1:
+                # If the user was previously disliking and now likes
+                cursor.execute(
+                    "UPDATE posts SET likes = likes + 1, dislikes = dislikes - 1 WHERE id = %s",
+                    (post_id,)
+                )
+            
             cursor.execute(
                 "UPDATE likes SET reaction = %s WHERE id = %s",
                 (reaction, existing_reaction['id'])
             )
+
         else:
             # If no reaction exists, insert a new record
             cursor.execute(
                 "INSERT INTO likes (post_id, user_id, reaction) VALUES (%s, %s, %s)",
                 (post_id, user_id, reaction)
             )
+            if reaction == 1:
+                cursor.execute(
+                    "UPDATE posts SET likes = likes + 1 WHERE id = %s",
+                    (post_id,)
+                )
+            elif reaction == -1:
+                cursor.execute(
+                    "UPDATE posts SET dislikes = dislikes + 1 WHERE id = %s",
+                    (post_id,)
+                )
+
         conn.commit()
         return jsonify({'message': 'Reaction updated'}), 200
-    except Exception:
+    except Exception as e:
         conn.rollback()
-        return jsonify({'error': 'Could not update reaction'}), 500
+        return jsonify({'error': 'Could not update reaction', "error string": str(e)}), 500
     finally:
         cursor.close()
         conn.close()
