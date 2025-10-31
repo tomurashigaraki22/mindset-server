@@ -1,0 +1,8 @@
+flask
+flask-mail
+flask-cors
+pymysql
+pyjwt
+flask_jwt_extended
+google.generativeai
+python-dotenv
