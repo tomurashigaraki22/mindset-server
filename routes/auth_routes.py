@@ -4,13 +4,21 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from utils.db_helper import get_db_connection
 import pymysql
 import stripe
-from datetime import timedelta
+from dotenv import load_dotenv
+from datetime import timedelta, datetime
+import requests
 
 import os
+load_dotenv()
 import google.generativeai as genai
 
 auth = Blueprint('auth', __name__)
+PAYPAL_CLIENT_ID = "AU4cjGgjCzRvANikWUNe_4U-km4mK1PodmfLnxzipXh49Rubk4Au89h9TbLirHmeY5NMrQmVqtJ99ioN"
+PAYPAL_SECRET = "EPBa65CjR833nRpu5vJEBLmrvdJT8_uaeCv97q0LxEvo8vI0PIk58i_w1fLvUt7UIDkBe-jaw4fZx9Jk"
+PAYPAL_API = "https://api-m.sandbox.paypal.com"  # Switch to live API for production
 stripe.api_key = os.getenv('STRIPE_SECRET_KEY')
+
+
 
 @auth.route('/create-payment-intent-10', methods=['POST'])
 def create_payment_intent_10():
@@ -52,6 +60,146 @@ def get_publishable_key():
         return jsonify({'error': 'Publishable key not found'}), 404
 
     return jsonify({'publishable_key': publishable_key}), 200
+
+
+
+@auth.route('/create-paypal-order', methods=['POST'])
+@jwt_required()
+def create_paypal_order():
+    """Create a PayPal order for the chosen subscription."""
+    user_email = get_jwt_identity()
+    data = request.json
+    subscription_type = data.get('subscription_type')
+
+    if subscription_type not in ['pro', 'premium']:
+        return jsonify({'error': 'Invalid subscription type'}), 400
+
+    amount = 10.00 if subscription_type == 'pro' else 18.00
+
+    try:
+        # Get OAuth2 token from PayPal
+        auth_response = requests.post(
+            f"{PAYPAL_API}/v1/oauth2/token",
+            headers={'Accept': 'application/json', 'Accept-Language': 'en_US'},
+            auth=(PAYPAL_CLIENT_ID, PAYPAL_SECRET),
+            data={'grant_type': 'client_credentials'}
+        )
+        access_token = auth_response.json().get('access_token')
+
+        # Create PayPal order
+        order_payload = {
+            "intent": "CAPTURE",
+            "purchase_units": [
+                {
+                    "amount": {
+                        "currency_code": "USD",
+                        "value": str(amount)
+                    },
+                    "description": f"{subscription_type.capitalize()} Plan Subscription"
+                }
+            ],
+            "application_context": {
+                "return_url": "https://example.com/return",
+                "cancel_url": "https://example.com/cancel"
+            }
+        }
+
+        order_response = requests.post(
+            f"{PAYPAL_API}/v2/checkout/orders",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {access_token}"
+            },
+            json=order_payload
+        )
+
+        return jsonify(order_response.json()), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@auth.route('/capture-paypal-order', methods=['POST'])
+@jwt_required()
+def capture_paypal_order():
+    """Capture the PayPal order and update subscription."""
+    user_email = get_jwt_identity()
+    data = request.json
+    order_id = data.get('orderID')
+
+    if not order_id:
+        return jsonify({'error': 'Missing orderID'}), 400
+
+    try:
+        # Get PayPal access token again
+        auth_response = requests.post(
+            f"{PAYPAL_API}/v1/oauth2/token",
+            headers={'Accept': 'application/json', 'Accept-Language': 'en_US'},
+            auth=(PAYPAL_CLIENT_ID, PAYPAL_SECRET),
+            data={'grant_type': 'client_credentials'}
+        )
+        access_token = auth_response.json().get('access_token')
+
+        # Capture order
+        capture_response = requests.post(
+            f"{PAYPAL_API}/v2/checkout/orders/{order_id}/capture",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {access_token}"
+            }
+        )
+        capture_data = capture_response.json()
+
+        # Extract amount and description safely
+        purchase = capture_data.get("purchase_units", [{}])[0]
+        amount_value = float(purchase.get("payments", {}).get("captures", [{}])[0].get("amount", {}).get("value", 0))
+        description = purchase.get("description", "")
+        subscription_type = 'pro' if 'Pro' in description else 'premium'
+
+        # Find user ID
+        conn = get_db_connection()
+        cursor = conn.cursor(pymysql.cursors.DictCursor)
+        cursor.execute("SELECT id FROM users WHERE email = %s", (user_email,))
+        user = cursor.fetchone()
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+
+        user_id = user['id']
+
+        # Update or insert subscription
+        cursor.execute("SELECT * FROM subscriptions WHERE user_id = %s", (user_id,))
+        sub = cursor.fetchone()
+
+        new_expiry = datetime.utcnow() + timedelta(days=30)
+        if sub:
+            cursor.execute("""
+                UPDATE subscriptions 
+                SET subscription_type = %s, amount = %s, expires_at = %s 
+                WHERE user_id = %s
+            """, (subscription_type, amount_value, new_expiry, user_id))
+        else:
+            cursor.execute("""
+                INSERT INTO subscriptions (user_id, subscription_type, amount, expires_at)
+                VALUES (%s, %s, %s, %s)
+            """, (user_id, subscription_type, amount_value, new_expiry))
+
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        return jsonify({
+            'message': 'Subscription updated successfully!',
+            'subscription_type': subscription_type,
+            'amount': amount_value,
+            'expires_at': new_expiry.isoformat()
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+
+
 
 @auth.route('/register', methods=['POST'])
 def register():
