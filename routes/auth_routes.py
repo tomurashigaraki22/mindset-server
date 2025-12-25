@@ -325,13 +325,13 @@ def me():
         if not user:
             return jsonify({'error': 'User not found'}), 404
 
-        # Fetch role; default to 'member' if none
+        # Fetch role; default to 'user' if none
         cursor.execute("SELECT role FROM user_roles WHERE user_id = %s", (user['id'],))
         role_row = cursor.fetchone()
         if role_row:
             role = role_row['role'] if isinstance(role_row, dict) else role_row[0]
         else:
-            role = 'member'
+            role = 'user'
 
         return jsonify({
             'id': user['id'],

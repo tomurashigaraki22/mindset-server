@@ -22,7 +22,7 @@ def _get_user_role(user_id):
     try:
         cursor.execute("SELECT role FROM user_roles WHERE user_id = %s", (user_id,))
         row = cursor.fetchone()
-        return row['role'] if row else 'member'
+        return row['role'] if row else 'user'
     finally:
         cursor.close()
         conn.close()
